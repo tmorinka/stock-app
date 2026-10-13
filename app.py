@@ -24,15 +24,39 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WATCHLIST_FILE = os.path.join(BASE_DIR, "watchlist.json")
 PORTFOLIO_FILE = os.path.join(BASE_DIR, "portfolio.json")
 
-# 精鋭20銘柄
+# デフォルト精鋭リスト（楽天グループ・村田製作所を追加した全22銘柄）
 DEFAULT_WATCHLIST = {
-    "ディスコ (6146)": "6146.T", "アドバンテスト (6857)": "6857.T", "東京エレクトロン (8035)": "8035.T",
-    "ソシオネクスト (6526)": "6526.T", "フジクラ (5803)": "5803.T", "ソフトバンクG (9984)": "9984.T",
-    "日立製作所 (6501)": "6501.T", "三菱重工業 (7011)": "7011.T", "信越化学工業 (4063)": "4063.T",
-    "三菱UFJ (8306)": "8306.T", "三井住友FG (8316)": "8316.T", "野村HD (8604)": "8604.T",
-    "オリックス (8591)": "8591.T", "三菱商事 (8058)": "8058.T", "丸紅 (8002)": "8002.T",
-    "ENEOS HD (5020)": "5020.T", "トヨタ自動車 (7203)": "7203.T", "本田技研 (7267)": "7267.T",
-    "川崎汽船 (9107)": "9107.T", "神戸製鋼所 (5406)": "5406.T"
+    # --- 最強半導体・電子部品・ハイテク ---
+    "ディスコ (6146)": "6146.T",
+    "アドバンテスト (6857)": "6857.T",
+    "東京エレクトロン (8035)": "8035.T",
+    "ソシオネクスト (6526)": "6526.T",
+    "村田製作所 (6981)": "6981.T",
+    "フジクラ (5803)": "5803.T",
+    "ソフトバンクG (9984)": "9984.T",
+    "楽天グループ (4755)": "4755.T",
+
+    # --- 重電・国策・インフラ ---
+    "日立製作所 (6501)": "6501.T",
+    "三菱重工業 (7011)": "7011.T",
+    "信越化学工業 (4063)": "4063.T",
+
+    # --- メガバンク・金融 ---
+    "三菱UFJ (8306)": "8306.T",
+    "三井住友FG (8316)": "8316.T",
+    "野村HD (8604)": "8604.T",
+    "オリックス (8591)": "8591.T",
+
+    # --- 総合商社・資源 ---
+    "三菱商事 (8058)": "8058.T",
+    "丸紅 (8002)": "8002.T",
+    "ENEOS HD (5020)": "5020.T",
+
+    # --- 自動車・景気敏感 ---
+    "トヨタ自動車 (7203)": "7203.T",
+    "本田技研 (7267)": "7267.T",
+    "川崎汽船 (9107)": "9107.T",
+    "神戸製鋼所 (5406)": "5406.T"
 }
 
 # ==========================================
@@ -102,7 +126,8 @@ if "target_symbol" not in st.session_state:
 # 日本時間判定
 JST = timezone(timedelta(hours=9))
 now_jst = datetime.now(JST)
-is_trading_hours = (now_jst.weekday() < 5) and (dtime(9, 0) <= now_jst.time() < dtime(18, 0))
+is_weekday = now_jst.weekday() < 5
+is_trading_hours = is_weekday and (dtime(9, 0) <= now_jst.time() < dtime(18, 0))
 
 if is_trading_hours:
     st.warning("⚠️ **【取引時間中またはデータ確定前】** 日足未確定のため判定が不安定になります。夜20時以降の確認を推奨します。")
@@ -111,7 +136,7 @@ if is_trading_hours:
 # サイドバー
 # ==========================================
 st.sidebar.header("📋 銘柄リスト管理")
-if st.sidebar.button("🔄 精鋭20銘柄に初期化", use_container_width=True):
+if st.sidebar.button("🔄 デフォルト銘柄に初期化", use_container_width=True, help="楽天グループと村田製作所を含む最新の22銘柄にリセットします"):
     st.session_state.watchlist = DEFAULT_WATCHLIST.copy()
     save_watchlist(st.session_state.watchlist)
     st.session_state.target_symbol = list(DEFAULT_WATCHLIST.keys())[0]
@@ -134,6 +159,10 @@ with st.sidebar.expander("➕ 銘柄を追加", expanded=False):
             st.rerun()
 
 w_keys = list(st.session_state.watchlist.keys())
+if not w_keys:
+    st.session_state.watchlist = DEFAULT_WATCHLIST.copy()
+    w_keys = list(st.session_state.watchlist.keys())
+
 if st.session_state.target_symbol not in w_keys: st.session_state.target_symbol = w_keys[0]
 selected_name = st.sidebar.selectbox("個別分析銘柄", w_keys, index=w_keys.index(st.session_state.target_symbol))
 st.session_state.target_symbol = selected_name
@@ -240,11 +269,9 @@ def calculate_indicators(df_raw, n225_ok, use_filter, capital_limit, lot_size):
     breakout = (c > res_20) & vol_up
 
     df["Buy_Candidate"] = base_bull & (dip_touch | breakout)
-    
-    # セットアップ名の整合性修正
     df["Buy_Setup"] = np.where(df["Buy_Candidate"], np.where(breakout, "高値ブレイク", "25日線反発"), "-")
 
-    # 【致命的欠陥1修正】資金制約チェック
+    # 資金制約チェック
     is_affordable = (c * lot_size) <= capital_limit
     df["Capital_Over"] = df["Buy_Candidate"] & (~is_affordable)
 
@@ -258,7 +285,7 @@ def calculate_indicators(df_raw, n225_ok, use_filter, capital_limit, lot_size):
     return df
 
 # ==========================================
-# ポジション判定エンジン（【致命的欠陥2修正：建値防衛の完全発動】）
+# ポジション判定エンジン
 # ==========================================
 def evaluate_position(df, ticker_code, portfolio):
     last = df.iloc[-1]
@@ -278,7 +305,6 @@ def evaluate_position(df, ticker_code, portfolio):
             entry_p = float(pos["entry_price"])
             gain_pct = ((c_val - entry_p) / entry_p) * 100
 
-            # 保有期間の最高値を追跡
             pos_high = float(rows["High"].max()) if not rows.empty else c_val
             max_gain_pct = ((pos_high - entry_p) / entry_p) * 100
 
@@ -292,7 +318,7 @@ def evaluate_position(df, ticker_code, portfolio):
             if days_held >= 5 and gain_pct < 2.0:
                 return f"🚨 タイムストップ撤退 (5日停滞・{gain_pct:+.1f}%)", 1, False, hard_sl
 
-            # 3. 【致命的欠陥2修正】建値撤退トレール（一度+3%達成後、買値を割り込んだら即撤退）
+            # 3. 建値撤退トレール（一度+3%達成後、買値を割り込んだら即撤退）
             if max_gain_pct >= 3.0 and c_val <= entry_p:
                 return f"🛡️ 建値撤退発動 (損失ゼロ防衛・{gain_pct:+.1f}%)", 2, False, entry_p
 
@@ -300,7 +326,7 @@ def evaluate_position(df, ticker_code, portfolio):
             if c_val < float(last["SMA25"]):
                 return f"🔴 手仕舞い売却 (25日線割れ・{gain_pct:+.1f}%)", 2, False, hard_sl
 
-            # 5. ホールド（利益に応じて防衛ラインを引き上げ）
+            # 5. ホールド
             current_sl = entry_p if max_gain_pct >= 3.0 else hard_sl
             return f"📈 保有継続・ホールド ({days_held}日目・{gain_pct:+.1f}%)", 4, False, current_sl
         except Exception:
@@ -342,7 +368,7 @@ m1.metric("🇯🇵 日経平均", n_stat, "25日線上 (良好)" if n225_ok els
 m2.metric("🇺🇸 米国S&P500", f"{sp_chg:+.2f} %", "急落警戒" if sp_chg <= -1.5 else "適正")
 m3.metric("💴 ドル円", f"{uj_rate:.2f} 円")
 
-tab1, tab2 = st.tabs(["🔍 個別銘柄・行動指示書", "🚀 一括スキャナー (全精鋭20銘柄)"])
+tab1, tab2 = st.tabs(["🔍 個別銘柄・行動指示書", "🚀 一括スキャナー (全精鋭22銘柄)"])
 
 # ==========================================
 # TAB 1: 個別指示書
@@ -352,6 +378,26 @@ with tab1:
     if df.empty or len(df) < 30:
         st.error(f"データ取得不可: {ticker}")
     else:
+        # ★深夜・早朝・土日にも対応した正確なデータ未反映アラーム
+        latest_dt = df.index[-1].date()
+        weekday = now_jst.weekday()
+        now_time = now_jst.time()
+
+        if weekday < 5:  # 平日
+            if now_time >= dtime(18, 0):
+                # 平日夜18:00〜23:59 → 今日の日付であるべき
+                expected_date = now_jst.date()
+            else:
+                # 平日深夜0:00〜夕方17:59 → 前営業日であるべき（月曜なら金曜）
+                expected_date = (now_jst - timedelta(days=3 if weekday == 0 else 1)).date()
+        else:  # 土日
+            # 直前の金曜日の日付であるべき
+            expected_date = (now_jst - timedelta(days=1 if weekday == 5 else 2)).date()
+
+        if latest_dt < expected_date:
+            st.warning(f"🔔 **【データ更新待機中】最新の確定データ（{expected_date.strftime('%m/%d')}）がまだ反映されていません！**\n\n"
+                       f"現在表示されているのは **{latest_dt.strftime('%m/%d')}** の終値です。通常20:00〜21:30頃に最新化されます。")
+
         df = calculate_indicators(df, n225_ok, enable_mkt_filter, total_capital, lot_step)
         latest = df.iloc[-1]
         close = float(latest["Close"])
@@ -359,7 +405,7 @@ with tab1:
         sl_price = max(close - (atr * 2.0), 1.0)
         risk_per_share = max(close - sl_price, 1.0)
         
-        # 【致命的欠陥1修正】厳密なロット制限（リスク枠・口座資金枠の双方を超えない安全計算）
+        # 厳密なロット制限
         max_risk = total_capital * (risk_pct / 100.0)
         shares_by_risk = int(max_risk / risk_per_share)
         shares_by_capital = int(total_capital // close)
@@ -408,7 +454,7 @@ with tab1:
         else:
             st.info(f"### ⚪ 【待機】{action_msg} トレンド発生まで静観してください。")
 
-        # 【致命的欠陥4修正】売買サインマーカー付き4段統合チャート
+        # 売買サインマーカー付き4段統合チャート
         n = len(df)
         x_idx = list(range(n))
         d_strs = df.index.strftime('%Y-%m-%d').tolist()
@@ -422,7 +468,6 @@ with tab1:
         fig.add_trace(go.Scatter(x=x_idx, y=df['SMA5'], line=dict(color='yellow', width=1), name='5日線'), row=1, col=1)
         fig.add_trace(go.Scatter(x=x_idx, y=df['SMA25'], line=dict(color='orange', width=2), name='25日線'), row=1, col=1)
         
-        # 買いシグナルマーカーの描画
         if buy_idx:
             fig.add_trace(go.Scatter(x=buy_idx, y=(df['Low'].iloc[buy_idx] * 0.98), mode='markers',
                                      marker=dict(symbol='triangle-up', size=13, color='#00FF00'), name='買いサイン'), row=1, col=1)
@@ -444,10 +489,10 @@ with tab1:
         st.plotly_chart(fig, use_container_width=True)
 
 # ==========================================
-# TAB 2: 一括スキャナー (【致命的欠陥3修正：ゼロ除算クラッシュ完全防御】)
+# TAB 2: 一括スキャナー (全精鋭22銘柄)
 # ==========================================
 with tab2:
-    st.markdown("### 📡 監視銘柄の一括スクリーニング (全精鋭20銘柄)")
+    st.markdown("### 📡 監視銘柄の一括スクリーニング (全精鋭22銘柄)")
     if st.button("一括スキャンを実行", use_container_width=True):
         results = []
         p_bar = st.progress(0.0)
@@ -461,11 +506,10 @@ with tab2:
                     sub_df = calculate_indicators(sub_df, n225_ok, enable_mkt_filter, total_capital, lot_step)
                     c_val = float(sub_df["Close"].iloc[-1])
                     p_val = float(sub_df["Close"].iloc[-2])
-                    atr_val = float(sub_df["ATR"].iloc[-1])
+                    latest_date_str = sub_df.index[-1].strftime('%m/%d')
                     
                     action_msg, priority, is_buy, active_sl = evaluate_position(sub_df, t_code, st.session_state.portfolio)
                     
-                    # 【致命的欠陥1&3修正】ゼロ除算防御と買付余力制限
                     risk_dist = max(c_val - active_sl, 1.0)
                     r_shares_risk = int(max_risk / risk_dist)
                     r_shares_cap = int(total_capital // c_val) if c_val > 0 else 0
@@ -474,6 +518,7 @@ with tab2:
 
                     results.append({
                         "_p": priority,
+                        "確定日": latest_date_str,
                         "推奨行動": action_msg,
                         "銘柄名": name,
                         "現在値": f"{c_val:,.1f} 円",
@@ -485,12 +530,12 @@ with tab2:
                     })
                 else:
                     results.append({
-                        "_p": 9, "推奨行動": "⚠️ データ取得エラー", "銘柄名": name,
+                        "_p": 9, "確定日": "-", "推奨行動": "⚠️ データ取得エラー", "銘柄名": name,
                         "現在値": "-", "前日比": "-", "推奨株数": "-", "想定投資額": "-", "防衛SL": "-", "型": "-"
                     })
             except Exception:
                 results.append({
-                    "_p": 9, "推奨行動": "⚠️ 通信エラー", "銘柄名": name,
+                    "_p": 9, "確定日": "-", "推奨行動": "⚠️ 通信エラー", "銘柄名": name,
                     "現在値": "-", "前日比": "-", "推奨株数": "-", "想定投資額": "-", "防衛SL": "-", "型": "-"
                 })
             p_bar.progress((idx + 1) / len(items))
@@ -502,7 +547,7 @@ with tab2:
             st.session_state.scan_results = res_df.to_dict('records')
 
     if st.session_state.scan_results:
-        st.dataframe(pd.DataFrame(st.session_state.scan_results), use_container_width=True, height=550)
+        st.dataframe(pd.DataFrame(st.session_state.scan_results), use_container_width=True, height=600)
         buys = [r["銘柄名"] for r in st.session_state.scan_results if "新規買い" in r["推奨行動"]]
         sells = [r["銘柄名"] for r in st.session_state.scan_results if "手仕舞い" in r["推奨行動"] or "撤退" in r["推奨行動"] or "損切り" in r["推奨行動"]]
         
