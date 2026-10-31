@@ -17,16 +17,16 @@ try:
 except ImportError:
     HAS_GSHEETS = False
 
-st.set_page_config(page_title="日本株スイングトレード (真・完成版)", layout="wide", initial_sidebar_state="collapsed")
-st.title("🏹 スイングトレード統合分析システム (資金50万・完全防護版)")
+st.set_page_config(page_title="スイングトレード統合分析システム (資金50万Ver）", layout="wide", initial_sidebar_state="collapsed")
+st.title("🏹 スイングトレード統合分析システム (資金50万Ver）")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WATCHLIST_FILE = os.path.join(BASE_DIR, "watchlist.json")
 PORTFOLIO_FILE = os.path.join(BASE_DIR, "portfolio.json")
 
-# デフォルト精鋭リスト（楽天グループ・村田製作所を追加した全22銘柄）
+# デフォルト精鋭22銘柄
 DEFAULT_WATCHLIST = {
-    # --- 最強半導体・電子部品・ハイテク ---
+    # --- AI・半導体・電子部品（ハイテクモメンタム群） ---
     "ディスコ (6146)": "6146.T",
     "アドバンテスト (6857)": "6857.T",
     "東京エレクトロン (8035)": "8035.T",
@@ -57,6 +57,11 @@ DEFAULT_WATCHLIST = {
     "本田技研 (7267)": "7267.T",
     "川崎汽船 (9107)": "9107.T",
     "神戸製鋼所 (5406)": "5406.T"
+}
+
+# AI・半導体テック銘柄の定義（日経平均寄与度・テック連動大）
+AI_TECH_CODES = {
+    "6146.T", "6857.T", "8035.T", "6526.T", "6981.T", "5803.T", "9984.T", "4755.T"
 }
 
 # ==========================================
@@ -210,7 +215,8 @@ unit_mode = st.sidebar.radio("取引単位", ["単元未満株 (1株単位 / S�
 lot_step = 1 if "1株単位" in unit_mode else 100
 total_capital = st.sidebar.number_input("口座資金 (円)", value=500_000, step=50_000, on_change=clear_scan)
 risk_pct = st.sidebar.slider("1取引の許容損失 (%)", 1.0, 3.0, 2.0, 0.5, on_change=clear_scan)
-enable_mkt_filter = st.sidebar.checkbox("日経平均フィルター適用", value=True, on_change=clear_scan)
+enable_mkt_filter = st.sidebar.checkbox("スマート地合いフィルター適用", value=True, on_change=clear_scan,
+                                       help="AI・半導体安の時はAI株の順張りを抑えつつ、バリュー株の逆行高やAIの底打ちリバウンドは逃さず検知します")
 
 # ==========================================
 # データ取得
@@ -232,9 +238,9 @@ def load_data(sym, p="1y", i="1d"):
     except Exception: return pd.DataFrame()
 
 # ==========================================
-# 指標計算（王道ロジック）
+# 指標計算（スマート・セクター分離エンジン）
 # ==========================================
-def calculate_indicators(df_raw, n225_ok, use_filter, capital_limit, lot_size):
+def calculate_indicators(df_raw, n225_ok, use_filter, capital_limit, lot_size, sym):
     df = df_raw.copy()
     c, h, l, o = df["Close"], df["High"], df["Low"], df["Open"]
     v = df["Volume"] if "Volume" in df.columns else pd.Series(1, index=df.index)
@@ -253,13 +259,24 @@ def calculate_indicators(df_raw, n225_ok, use_filter, capital_limit, lot_size):
     gain = delta.where(delta > 0, 0.0).ewm(alpha=1/14, adjust=False).mean()
     loss = (-delta.where(delta < 0, 0.0)).ewm(alpha=1/14, adjust=False).mean()
     df["RSI"] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
+    rsi = df["RSI"]
 
     # MACD
     df["MACD"] = c.ewm(span=12, adjust=False).mean() - c.ewm(span=26, adjust=False).mean()
     df["Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
     df["MACD_Hist"] = df["MACD"] - df["Signal"]
 
-    # 買いシグナル判定
+    # 25日線乖離率
+    df["MA25_Bias"] = (c - df["SMA25"]) / df["SMA25"]
+
+    # 判定用基本要素
+    is_ai_tech = sym in AI_TECH_CODES
+    body = (c - o).abs()
+    lower_wick = np.maximum(np.minimum(c, o) - l, 0.0)
+
+    # ----------------------------------------------------
+    # ① 王道の順張りセットアップ（押し目反発 / 高値ブレイク）
+    # ----------------------------------------------------
     sma25_up = df["SMA25"] >= df["SMA25"].shift(5) * 0.998
     base_bull = (c > df["SMA25"]) & sma25_up
 
@@ -268,19 +285,75 @@ def calculate_indicators(df_raw, n225_ok, use_filter, capital_limit, lot_size):
     vol_up = v >= df["Vol_SMA20"] * 1.2
     breakout = (c > res_20) & vol_up
 
-    df["Buy_Candidate"] = base_bull & (dip_touch | breakout)
-    df["Buy_Setup"] = np.where(df["Buy_Candidate"], np.where(breakout, "高値ブレイク", "25日線反発"), "-")
+    trend_buy_candidate = base_bull & (dip_touch | breakout)
+
+    # ----------------------------------------------------
+    # ② AI・半導体特化「セリクラ底打ちリバウンド」
+    # ----------------------------------------------------
+    rsi_oversold = rsi <= 42
+    deep_dip = df["MA25_Bias"] <= -0.05
+    rebound_candle = (c > o) & ((lower_wick >= body * 1.2) | (c > c.shift(1)) | (c > o.shift(1)))
+    vol_support = v >= df["Vol_SMA20"] * 0.8
+    ai_rebound_candidate = is_ai_tech & (c < df["SMA25"]) & rsi_oversold & deep_dip & rebound_candle & vol_support
+
+    # セットアップ名の決定
+    setup_names = []
+    for is_tr, is_reb, is_brk in zip(trend_buy_candidate, ai_rebound_candidate, breakout):
+        if is_reb:
+            setup_names.append("AI底打ちリバウンド")
+        elif is_tr and is_brk:
+            setup_names.append("高値ブレイク")
+        elif is_tr:
+            setup_names.append("25日線反発")
+        else:
+            setup_names.append("-")
+    df["Buy_Setup"] = setup_names
 
     # 資金制約チェック
     is_affordable = (c * lot_size) <= capital_limit
-    df["Capital_Over"] = df["Buy_Candidate"] & (~is_affordable)
+    raw_buy = trend_buy_candidate | ai_rebound_candidate
+    df["Capital_Over"] = raw_buy & (~is_affordable)
 
-    if use_filter:
-        df["Buy_Signal"] = df["Buy_Candidate"] & n225_ok & is_affordable
-        df["Filtered_Out"] = df["Buy_Candidate"] & (~n225_ok) & is_affordable
-    else:
-        df["Buy_Signal"] = df["Buy_Candidate"] & is_affordable
-        df["Filtered_Out"] = False
+    # ----------------------------------------------------
+    # ③ スマート地合いフィルター
+    # ----------------------------------------------------
+    buy_signals = []
+    filtered_outs = []
+
+    for idx, (row_c, is_tr, is_reb) in enumerate(zip(c, trend_buy_candidate, ai_rebound_candidate)):
+        afford = (row_c * lot_size) <= capital_limit
+        if not afford:
+            buy_signals.append(False)
+            filtered_outs.append(False)
+            continue
+
+        if not use_filter:
+            buy_signals.append(is_tr or is_reb)
+            filtered_outs.append(False)
+        else:
+            if is_reb:
+                # 【AIリバウンド】自律反発を狙うため、日経平均に関わらず即点灯
+                buy_signals.append(True)
+                filtered_outs.append(False)
+            elif is_tr:
+                if not is_ai_tech:
+                    # 【非AI・バリュー株】個別株が25日線上なら「逆行高買い」として許可
+                    buy_signals.append(True)
+                    filtered_outs.append(False)
+                else:
+                    # 【AI株順張り】日経平均健全時のみ許可
+                    if n225_ok:
+                        buy_signals.append(True)
+                        filtered_outs.append(False)
+                    else:
+                        buy_signals.append(False)
+                        filtered_outs.append(True)
+            else:
+                buy_signals.append(False)
+                filtered_outs.append(False)
+
+    df["Buy_Signal"] = buy_signals
+    df["Filtered_Out"] = filtered_outs
 
     return df
 
@@ -333,14 +406,21 @@ def evaluate_position(df, ticker_code, portfolio):
             return "📈 保有継続", 4, False, initial_sl
 
     # 【未保有銘柄の判定】
+    setup_name = last.get("Buy_Setup", "-")
     if last["Buy_Signal"]:
-        return "🟢 明日朝一【新規買い】", 3, True, initial_sl
+        if setup_name == "AI底打ちリバウンド":
+            return "🟢 朝一【AI底打ちリバウンド買い】", 3, True, initial_sl
+        elif ticker_code not in AI_TECH_CODES and float(last["Close"]) > float(last["SMA25"]):
+            return "🟢 朝一【逆行高バリュー買い】", 3, True, initial_sl
+        else:
+            return "🟢 明日朝一【新規買い】", 3, True, initial_sl
     elif last.get("Capital_Over", False):
         return "⚠️ 資金超過 (買付不可)", 5, False, initial_sl
     elif last.get("Filtered_Out", False):
-        return "⚠️ 地合いNG【見送り】", 6, False, initial_sl
+        return "⚠️ AI地合い警戒【見送り】", 6, False, initial_sl
     elif c_val < float(last["SMA25"]):
-        return "🔴 25日線下（買い不可）", 8, False, initial_sl
+        # ★【修正箇所】「買い」という単語を排除して集計誤認を根絶
+        return "🔴 25日線下（下落トレンド・静観）", 8, False, initial_sl
     else:
         return "⚪ 様子見・待機", 7, False, initial_sl
 
@@ -364,7 +444,7 @@ n225_ok, n_stat, sp_chg, uj_rate = get_market_env()
 
 st.markdown("### 🌐 市場環境サマリー")
 m1, m2, m3 = st.columns(3)
-m1.metric("🇯🇵 日経平均", n_stat, "25日線上 (良好)" if n225_ok else "25日線下 (下落警戒)")
+m1.metric("🇯🇵 日経平均", n_stat, "25日線上 (良好)" if n225_ok else "25日線下 (AI・テック調整警戒)")
 m2.metric("🇺🇸 米国S&P500", f"{sp_chg:+.2f} %", "急落警戒" if sp_chg <= -1.5 else "適正")
 m3.metric("💴 ドル円", f"{uj_rate:.2f} 円")
 
@@ -378,27 +458,24 @@ with tab1:
     if df.empty or len(df) < 30:
         st.error(f"データ取得不可: {ticker}")
     else:
-        # ★深夜・早朝・土日にも対応した正確なデータ未反映アラーム
+        # 深夜・早朝・土日対応のデータ未反映アラーム
         latest_dt = df.index[-1].date()
         weekday = now_jst.weekday()
         now_time = now_jst.time()
 
-        if weekday < 5:  # 平日
+        if weekday < 5:
             if now_time >= dtime(18, 0):
-                # 平日夜18:00〜23:59 → 今日の日付であるべき
                 expected_date = now_jst.date()
             else:
-                # 平日深夜0:00〜夕方17:59 → 前営業日であるべき（月曜なら金曜）
                 expected_date = (now_jst - timedelta(days=3 if weekday == 0 else 1)).date()
-        else:  # 土日
-            # 直前の金曜日の日付であるべき
+        else:
             expected_date = (now_jst - timedelta(days=1 if weekday == 5 else 2)).date()
 
         if latest_dt < expected_date:
             st.warning(f"🔔 **【データ更新待機中】最新の確定データ（{expected_date.strftime('%m/%d')}）がまだ反映されていません！**\n\n"
                        f"現在表示されているのは **{latest_dt.strftime('%m/%d')}** の終値です。通常20:00〜21:30頃に最新化されます。")
 
-        df = calculate_indicators(df, n225_ok, enable_mkt_filter, total_capital, lot_step)
+        df = calculate_indicators(df, n225_ok, enable_mkt_filter, total_capital, lot_step, ticker)
         latest = df.iloc[-1]
         close = float(latest["Close"])
         atr = float(latest["ATR"])
@@ -451,8 +528,10 @@ with tab1:
             """)
         elif priority == 5:
             st.error(f"### ⚠️ 【買付資金不足】最低単位（{lot_step}株）の必要資金（約 {close * lot_step:,.0f} 円）が口座資金（{total_capital:,.0f} 円）を超過しています。")
+        elif priority == 6:
+            st.warning("### ⚠️ 【見送り指示】日経平均（半導体・AI指数）が軟調のため、AI関連の順張り買いは見合わせます（底打ち反発待ち）。")
         else:
-            st.info(f"### ⚪ 【待機】{action_msg} トレンド発生まで静観してください。")
+            st.info(f"### ⚪ 【待機】{action_msg} トレンド発生または底打ち反発まで静観してください。")
 
         # 売買サインマーカー付き4段統合チャート
         n = len(df)
@@ -503,7 +582,7 @@ with tab2:
             try:
                 sub_df = load_data(t_code)
                 if not sub_df.empty and len(sub_df) >= 30:
-                    sub_df = calculate_indicators(sub_df, n225_ok, enable_mkt_filter, total_capital, lot_step)
+                    sub_df = calculate_indicators(sub_df, n225_ok, enable_mkt_filter, total_capital, lot_step, t_code)
                     c_val = float(sub_df["Close"].iloc[-1])
                     p_val = float(sub_df["Close"].iloc[-2])
                     latest_date_str = sub_df.index[-1].strftime('%m/%d')
@@ -548,7 +627,9 @@ with tab2:
 
     if st.session_state.scan_results:
         st.dataframe(pd.DataFrame(st.session_state.scan_results), use_container_width=True, height=600)
-        buys = [r["銘柄名"] for r in st.session_state.scan_results if "新規買い" in r["推奨行動"]]
+        
+        # ★【修正箇所】本物の買いシグナル「🟢」が付いているものだけを厳密に抽出！
+        buys = [r["銘柄名"] for r in st.session_state.scan_results if "🟢" in r["推奨行動"]]
         sells = [r["銘柄名"] for r in st.session_state.scan_results if "手仕舞い" in r["推奨行動"] or "撤退" in r["推奨行動"] or "損切り" in r["推奨行動"]]
         
         c1, c2 = st.columns(2)
